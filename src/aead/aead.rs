@@ -77,14 +77,15 @@ impl OpeningKey {
 }
 
 /// Authenticates and decrypts (&ldquo;opens&rdquo;) data in place. When
-/// `open_in_place` returns `Ok(out_len)`, the decrypted output is
-/// `&in_out[..out_len]`.
+/// `open_in_place` returns `Ok(plaintext)`, the decrypted output is
+/// `plaintext`, which is a slice of `in_out`.
 ///
 /// C analog: `EVP_AEAD_CTX_open`
 ///
 /// Go analog: [`AEAD.Open`](https://golang.org/pkg/crypto/cipher/#AEAD)
-pub fn open_in_place(key: &OpeningKey, nonce: &[u8], in_out: &mut [u8],
-                     ad: &[u8]) -> Result<usize, error::Unspecified> {
+pub fn open_in_place<'a>(key: &OpeningKey, nonce: &[u8], in_out: &'a mut [u8],
+                         ad: &[u8])
+                         -> Result<&'a mut [u8], error::Unspecified> {
     let nonce = try!(slice_as_array_ref!(nonce, NONCE_LEN));
     let ciphertext_len =
         try!(in_out.len().checked_sub(TAG_LEN).ok_or(error::Unspecified));
@@ -104,7 +105,8 @@ pub fn open_in_place(key: &OpeningKey, nonce: &[u8], in_out: &mut [u8],
         }
         return Err(error::Unspecified);
     }
-    Ok(ciphertext_len) // `ciphertext_len` is also the plaintext length.
+    // `ciphertext_len` is also the plaintext length.
+    Ok(&mut in_out[..ciphertext_len])
 }
 
 /// A key for encrypting and signing (&ldquo;sealing&rdquo;) data.
@@ -324,9 +326,7 @@ mod tests {
                 None => {
                     assert_eq!(Ok(ct.len()), s_result);
                     assert_eq!(&ct[..], &s_in_out[..ct.len()]);
-                    assert_eq!(Ok(plaintext.len()), o_result);
-                    assert_eq!(&plaintext[..],
-                                &o_in_out[..plaintext.len()]);
+                    assert_eq!(&plaintext[..], o_result.unwrap());
                 },
                 Some(ref error) if error == "WRONG_NONCE_LENGTH" => {
                     assert_eq!(Err(error::Unspecified), s_result);
