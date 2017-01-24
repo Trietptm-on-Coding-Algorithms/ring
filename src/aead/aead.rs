@@ -151,36 +151,40 @@ impl SealingKey {
 ///
 /// The input is `in_out[..(in_out.len() - out_suffix_capacity)]`; i.e. the
 /// input is the part of `in_out` that precedes the suffix. When
-/// `seal_in_place` returns `Ok(out_len)`, the encrypted and signed output is
-/// `in_out[..out_len]`; i.e.  the output has been written over input and at
-/// least part of the data reserved for the suffix. (The input/output buffer
-/// is expressed this way because Rust's type system does not allow us to have
-/// two slices, one mutable and one immutable, that reference overlapping
-/// memory at the same time.)
+/// `seal_in_place` returns `Ok(ciphertext_and_tag)`, the encrypted and signed
+/// output is `ciphertext_and_tag`, which is a slice of `in_out`.
 ///
-/// `out_suffix_capacity` must be at least `key.algorithm.max_overhead_len()`.
-/// See also `MAX_OVERHEAD_LEN`.
+/// `out_suffix_capacity` should almost always be
+/// `key.algorithm.max_overhead_len()`; for currently-supported AEADs, it must
+/// always be at least `key.algorithm.max_overhead_len()`.
 ///
 /// `ad` is the additional authenticated data, if any.
 ///
 /// C analog: `EVP_AEAD_CTX_seal`.
 ///
 /// Go analog: [`AEAD.Seal`](https://golang.org/pkg/crypto/cipher/#AEAD)
-pub fn seal_in_place(key: &SealingKey, nonce: &[u8], in_out: &mut [u8],
-                     out_suffix_capacity: usize, ad: &[u8])
-                     -> Result<usize, error::Unspecified> {
-    if out_suffix_capacity < key.key.algorithm.max_overhead_len() {
-        return Err(error::Unspecified);
-    }
+pub fn seal_in_place<'a>(key: &SealingKey, nonce: &[u8], in_out: &'a mut [u8],
+                         out_suffix_capacity: usize, ad: &[u8])
+                         -> Result<&'a mut [u8], error::Unspecified> {
     let nonce = try!(slice_as_array_ref!(nonce, NONCE_LEN));
     let in_out_len =
-        try!(in_out.len().checked_sub(out_suffix_capacity)
-                         .ok_or(error::Unspecified));
+        try!(in_out.len()
+                   .checked_sub(out_suffix_capacity).ok_or(error::Unspecified));
     try!(check_per_nonce_max_bytes(in_out_len));
-    let (in_out, tag_out) = in_out.split_at_mut(in_out_len);
-    let tag_out = try!(slice_as_array_ref_mut!(tag_out, TAG_LEN));
-    try!((key.key.algorithm.seal)(&key.key.ctx_buf, nonce, in_out, tag_out, ad));
-    Ok(in_out_len + TAG_LEN)
+    let ciphertext_and_tag_len = in_out_len + TAG_LEN;
+    if ciphertext_and_tag_len > in_out.len() {
+        return Err(error::Unspecified);
+    }
+    {
+        let (in_out, tag_out) = in_out.split_at_mut(in_out_len);
+        if tag_out.len() < TAG_LEN {
+        }
+        let tag_out =
+            try!(slice_as_array_ref_mut!(&mut tag_out[0..TAG_LEN], TAG_LEN));
+        try!((key.key.algorithm.seal)(&key.key.ctx_buf, nonce, in_out, tag_out,
+                                      ad));
+    }
+    Ok(&mut in_out[..ciphertext_and_tag_len])
 }
 
 /// `OpeningKey` and `SealingKey` are type-safety wrappers around `Key`, which
@@ -324,8 +328,7 @@ mod tests {
                                                &mut o_in_out[..], &ad);
             match error {
                 None => {
-                    assert_eq!(Ok(ct.len()), s_result);
-                    assert_eq!(&ct[..], &s_in_out[..ct.len()]);
+                    assert_eq!(&ct[..], s_result.unwrap());
                     assert_eq!(&plaintext[..], o_result.unwrap());
                 },
                 Some(ref error) if error == "WRONG_NONCE_LENGTH" => {
@@ -418,10 +421,10 @@ mod tests {
 
         // Construct a template input for `open_in_place`.
         let mut to_open = Vec::from(to_seal);
-        let ciphertext_len =
+        let ciphertext =
             try!(aead::seal_in_place(&s_key, &nonce[..nonce_len], &mut to_open,
                                      suffix_space, &ad));
-        let to_open = &to_open[..ciphertext_len];
+        let to_open = &ciphertext[..];
 
         // Nonce is the correct length.
         {
